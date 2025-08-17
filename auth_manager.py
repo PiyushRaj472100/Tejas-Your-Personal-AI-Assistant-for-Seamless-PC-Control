@@ -105,17 +105,20 @@ class AuthManager(QObject):
                     scopes=token_data.get('scopes')
                 )
                 
-                # Refresh if expired
-                if self.credentials.expired:
-                    self.credentials.refresh(Request())
+                print("🔄 Loading saved credentials...")
                 
-                # Get user info and verify in database
+                # Try to get user info (this will handle token refresh if needed)
                 user_info = self.get_user_info_from_token()
+                
                 if user_info:
                     self.current_user = user_info
                     print(f"✅ Auto-logged in as: {user_info.get('name')}")
                     return True
-                    
+                else:
+                    print("❌ Saved credentials are invalid")
+                    self.cleanup_saved_credentials()
+                    return False
+                        
             except Exception as e:
                 print(f"⚠️ Failed to load saved credentials: {e}")
                 self.cleanup_saved_credentials()
@@ -330,12 +333,29 @@ class AuthManager(QObject):
     def get_user_info_from_token(self):
         """Get user information from Google API using the access token"""
         if not self.credentials:
+            print("❌ No credentials available")
             return None
         
         try:
+            # Check if credentials are expired and try to refresh
+            if self.credentials.expired and self.credentials.refresh_token:
+                print("🔄 Token expired, attempting to refresh...")
+                try:
+                    self.credentials.refresh(Request())
+                    self.save_credentials()  # Save refreshed credentials
+                    print("✅ Token refreshed successfully")
+                except Exception as refresh_error:
+                    print(f"❌ Token refresh failed: {refresh_error}")
+                    self.cleanup_saved_credentials()
+                    return None
+            
             # Make request to Google's userinfo endpoint
             headers = {'Authorization': f'Bearer {self.credentials.token}'}
-            response = requests.get('https://www.googleapis.com/oauth2/v2/userinfo', headers=headers)
+            response = requests.get(
+                'https://www.googleapis.com/oauth2/v2/userinfo', 
+                headers=headers,
+                timeout=10  # Add timeout
+            )
             
             if response.status_code == 200:
                 user_data = response.json()
@@ -352,10 +372,57 @@ class AuthManager(QObject):
                 }
                 
                 return user_info
+                
+            elif response.status_code == 401:
+                print(f"❌ Token invalid (401). Response: {response.text}")
+                
+                # Try to refresh token if we have a refresh token
+                if self.credentials.refresh_token:
+                    print("🔄 Attempting token refresh due to 401 error...")
+                    try:
+                        self.credentials.refresh(Request())
+                        self.save_credentials()
+                        
+                        # Retry the request with new token
+                        headers = {'Authorization': f'Bearer {self.credentials.token}'}
+                        retry_response = requests.get(
+                            'https://www.googleapis.com/oauth2/v2/userinfo', 
+                            headers=headers,
+                            timeout=10
+                        )
+                        
+                        if retry_response.status_code == 200:
+                            user_data = retry_response.json()
+                            print(f"✅ Retrieved user data after refresh: {user_data.get('name')}")
+                            
+                            user_info = {
+                                'google_id': user_data.get('id'),
+                                'email': user_data.get('email'),
+                                'name': user_data.get('name'),
+                                'picture': user_data.get('picture'),
+                                'verified_email': user_data.get('verified_email', False),
+                                'last_login': datetime.now().isoformat()
+                            }
+                            
+                            return user_info
+                        else:
+                            print(f"❌ Retry also failed: {retry_response.status_code}")
+                            
+                    except Exception as refresh_error:
+                        print(f"❌ Token refresh failed: {refresh_error}")
+                
+                # Clear invalid credentials
+                print("🗑️ Clearing invalid credentials")
+                self.cleanup_saved_credentials()
+                return None
+                
             else:
                 print(f"❌ Failed to get user info: {response.status_code} - {response.text}")
                 return None
-                
+                    
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Network error getting user info: {e}")
+            return None
         except Exception as e:
             print(f"❌ Error getting user info: {e}")
             return None
@@ -412,21 +479,42 @@ class AuthManager(QObject):
     def is_user_authenticated(self):
         """Check if user is currently authenticated"""
         if not self.current_user or not self.credentials:
+            print("ℹ️ No current user or credentials")
             return False
         
-        # Check if credentials are still valid
+        # Check if credentials are still valid by making a test request
         try:
-            if self.credentials.expired:
+            # If token is expired, try to refresh
+            if self.credentials.expired and self.credentials.refresh_token:
                 print("🔄 Refreshing expired credentials...")
                 self.credentials.refresh(Request())
                 self.save_credentials()
             
-            return not self.credentials.expired
+            # Test the token by making a lightweight API call
+            headers = {'Authorization': f'Bearer {self.credentials.token}'}
+            response = requests.get(
+                'https://www.googleapis.com/oauth2/v1/tokeninfo',
+                params={'access_token': self.credentials.token},
+                timeout=5
+            )
             
+            if response.status_code == 200:
+                token_info = response.json()
+                # Check if token is for our client and has required scopes
+                if token_info.get('audience') == self.CLIENT_ID:
+                    return True
+                else:
+                    print("❌ Token audience mismatch")
+            else:
+                print(f"❌ Token validation failed: {response.status_code}")
+                
         except Exception as e:
             print(f"⚠️ Credential validation failed: {e}")
-            self.logout()
-            return False
+        
+        # If we get here, authentication failed
+        print("🔐 Authentication invalid, requiring fresh login")
+        self.logout()
+        return False
     
     def get_user_info(self):
         """Get current user information"""
