@@ -1,4 +1,4 @@
-# Tejas AI – Intelligent Desktop Assistant
+# Tejas: Personal AI Assistant for Seamless PC Control
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![PyQt5](https://img.shields.io/badge/PyQt5-5.15+-green.svg)](https://pypi.org/project/PyQt5/)
